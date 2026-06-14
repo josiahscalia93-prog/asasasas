@@ -300,28 +300,33 @@ LANG_MAP = {
 
 def build_system_prompt(framework: str, styling: str, extra: str, dsl: Optional[dict] = None) -> str:
     base = (
-        f"You are a senior frontend engineer specializing in pixel-perfect UI implementation. "
-        f"Convert the UI design into clean, production-ready {framework} code "
-        f"styled with {styling}. Requirements:\n"
-        f"- Match layout, spacing, colors, and typography as closely as possible.\n"
-        f"- Make it fully responsive and accessible (semantic HTML, aria where relevant).\n"
-        f"- Use placeholder images from https://placehold.co for any image regions.\n"
+        f"You are a world-class frontend engineer who reproduces designs PIXEL-PERFECT. "
+        f"Convert the UI design into clean, production-ready {framework} code styled with {styling}.\n\n"
+        f"FIDELITY RULES (follow exactly):\n"
+        f"1. Reproduce EVERY section visible in the screenshot, top to bottom — do not skip or summarize any part.\n"
+        f"2. Use the EXACT visible text content (read it from the image). Never invent, translate, or paraphrase copy.\n"
+        f"3. Match colors EXACTLY using the hex values from the spec/image — backgrounds, text, borders, accents, buttons.\n"
+        f"4. Match the typography: font family, relative font sizes, weights, letter-spacing and line-height.\n"
+        f"5. Recreate the DESKTOP layout and proportions: if the design has multiple columns, a grid, a sidebar, "
+        f"or a top navbar, reproduce that exact structure with flexbox/grid. Preserve spacing and alignment.\n"
+        f"6. Recreate borders, border-radius, shadows, dividers and rounded pills as seen.\n"
+        f"7. Use https://placehold.co/{{w}}x{{h}} for image/logo/avatar regions, sized to match the original.\n"
+        f"8. Add sensible hover/focus states for interactive elements.\n"
     )
     if framework == "HTML/CSS":
-        base += ("- Return a SINGLE complete, self-contained HTML document (with <!DOCTYPE html>, "
-                 "<head> including any CSS, and <body>) so it can render directly in an iframe. "
-                 "If using Tailwind CSS, include the Tailwind CDN script tag.\n")
+        base += ("- Return a SINGLE complete, self-contained HTML document (<!DOCTYPE html>, <head>, <body>). "
+                 "It must render correctly at 1280px desktop width. If using Tailwind, include "
+                 "<script src=\"https://cdn.tailwindcss.com\"></script>. Load any Google Fonts the design uses via <link>.\n")
     elif framework in ("React", "Next.js"):
         base += ("- Return a SINGLE self-contained React component file. Default-export a component named `App`. "
-                 "Do not include import statements for CSS. If using Tailwind, assume Tailwind is available. "
-                 "Inline any helper components in the same file.\n")
+                 "Do not import CSS files. If using Tailwind, assume it is available. Inline all helper components.\n")
     elif framework == "Vue 3":
         base += "- Return a SINGLE Vue 3 Single File Component (<template>, <script setup>, <style>).\n"
     if dsl:
-        base += ("\nUse this structured component specification (DSL) as the source of truth for layout, "
-                 "text content, and styles:\n" + json.dumps(dsl)[:6000] + "\n")
+        base += ("\nUse this structured component specification (extracted from the image) as the source of truth "
+                 "for layout, exact text content, colors and styles:\n" + json.dumps(dsl)[:12000] + "\n")
     if extra:
-        base += f"\nAdditional instructions from the user: {extra}\n"
+        base += f"\nAdditional user instructions (highest priority): {extra}\n"
     base += "\nOutput ONLY the code inside one fenced code block. No explanations before or after."
     return base
 
@@ -361,12 +366,18 @@ def extract_json(text: str) -> dict:
         return {"raw": text[:4000]}
 
 
-async def _run_chat(system_message: str, user_msg: UserMessage, provider: str, model: str) -> str:
+async def _run_chat(system_message: str, user_msg: UserMessage, provider: str, model: str,
+                    max_tokens: Optional[int] = None) -> str:
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"ui2code-{uuid.uuid4()}",
         system_message=system_message,
     ).with_model(provider, model)
+    if max_tokens:
+        try:
+            chat = chat.with_params(max_tokens=max_tokens)
+        except Exception:
+            pass
     collected = ""
     async for ev in chat.stream_message(user_msg):
         if isinstance(ev, TextDelta):
@@ -377,22 +388,29 @@ async def _run_chat(system_message: str, user_msg: UserMessage, provider: str, m
 
 
 DSL_SYSTEM = (
-    "You are a UI vision analyst. Analyze the provided UI design image and produce a structured JSON "
-    "component tree describing the layout. Extract: detected elements (navbar, hero, button, input, card, "
-    "grid, image, text, footer, etc.), their text content (OCR), nesting/hierarchy, and inferred styles "
-    "(colors as hex, font sizes, font weights, spacing, border radius, shadows, alignment). "
+    "You are a meticulous UI vision analyst. Study the UI design image carefully and output a detailed, "
+    "structured JSON component tree that another engineer could rebuild the screen from WITHOUT seeing the image.\n"
+    "Extract precisely:\n"
+    "- Every section top-to-bottom (navbar, hero, feature grid, cards, forms, buttons, inputs, images, footer, etc.).\n"
+    "- The EXACT visible text of each element (verbatim OCR — do not paraphrase).\n"
+    "- Inferred styles per element: background color (hex), text color (hex), font size (px), font weight, "
+    "border, borderRadius (px), boxShadow, padding/margin, and layout (flex/grid + direction + column count + gap + alignment).\n"
+    "- Image/logo/avatar regions with approximate width x height.\n"
     "Return ONLY valid JSON of the form: "
-    '{"meta":{"name":"...","theme":"light|dark","primaryColor":"#hex","fontFamily":"..."},'
-    '"tree":[{"type":"...","text":"...","styles":{...},"children":[...]}]}. No prose.'
+    '{"meta":{"name":"...","theme":"light|dark","background":"#hex","primaryColor":"#hex",'
+    '"fontFamily":"...","layoutWidthPx":1280},'
+    '"tree":[{"type":"...","text":"...","styles":{"bg":"#hex","color":"#hex","fontSize":"16px",'
+    '"fontWeight":600,"radius":"8px","layout":"flex-row","gap":"16px"},"children":[...]}]}. '
+    "No prose, JSON only."
 )
 
 
 async def analyze_to_dsl(image_b64: str, provider: str, model: str) -> dict:
     msg = UserMessage(
-        text="Analyze this UI design and return the JSON component tree.",
+        text="Analyze this UI design and return the detailed JSON component tree.",
         file_contents=[ImageContent(image_base64=image_b64)],
     )
-    raw = await _run_chat(DSL_SYSTEM, msg, provider, model)
+    raw = await _run_chat(DSL_SYSTEM, msg, provider, model, max_tokens=4000)
     return extract_json(raw)
 
 
@@ -400,10 +418,12 @@ async def synthesize_code(dsl: dict, framework: str, styling: str, extra: str,
                           image_b64: str, provider: str, model: str) -> str:
     system = build_system_prompt(framework, styling, extra, dsl)
     msg = UserMessage(
-        text=f"Generate the {framework} ({styling}) code for this design, matching the spec and image.",
+        text=(f"Generate the {framework} ({styling}) code for this design. "
+              f"Match the screenshot and the spec as closely as possible — exact text, exact colors, "
+              f"and the same desktop layout. Include every section."),
         file_contents=[ImageContent(image_base64=image_b64)],
     )
-    raw = await _run_chat(system, msg, provider, model)
+    raw = await _run_chat(system, msg, provider, model, max_tokens=8000)
     return strip_code_fences(raw)
 
 
@@ -419,7 +439,7 @@ async def refine_code(current_code: str, dsl: dict, instruction: str, framework:
     msg = UserMessage(
         text=f"Current code:\n```\n{current_code}\n```\n\nRequested change: {instruction}",
     )
-    raw = await _run_chat(system, msg, provider, model)
+    raw = await _run_chat(system, msg, provider, model, max_tokens=8000)
     return strip_code_fences(raw)
 
 
