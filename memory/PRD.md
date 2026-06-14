@@ -51,7 +51,15 @@ Build a homepage, login, signup, dashboard, and all website pages for the upload
 - Fixes: safe clipboard copy (no error overlay), dialog a11y description.
 - Tested: backend 23/23 pytest; frontend all critical flows pass.
 
-## Deferred (next round)
+## Iteration 3 (2026-06-14) — Reliability + Open in editor
+- **Fixed Cloudflare/proxy timeout on generate**: generation is now an async background job. `POST /api/generate` returns `{job_id}` instantly; frontend polls `GET /api/generate/status/{job_id}`. Verified: POST returns in <0.1s, IDE renders after job completes. Upload-screenshot → convert flow confirmed working.
+- **Refine is now async too** (same job + polling pattern) via `GET /api/refine/status/{job_id}` — prevents the same timeout class.
+- **Open in editor**: Projects card pencil (`edit-{id}`) and dialog `open-in-editor-btn` → `/convert?project={id}` loads a saved project (code, versions, dsl, image) straight into the playground.
+- Hardened jobs: index on (id,user_id), stale 'processing' jobs marked errored on startup. Budget errors surfaced with a clear "top up Universal Key" message.
+- Verified: backend async generate + async refine end-to-end (curl); frontend compiles clean.
+
+## Known external issue
+- EMERGENT_LLM_KEY (Universal Key) hit its budget cap during testing ("Budget exceeded: cost 1.46 > 1.4"). User must top up: Profile → Universal Key → Add Balance. Default model is Claude Sonnet 4.6; GPT-4o/Gemini also draw from the same balance.
 - Google + GitHub OAuth social login.
 - Real Stripe checkout (currently pricing UI placeholder).
 - Persistent light/dark theme toggle.

@@ -166,6 +166,16 @@ export default function Converter() {
     throw new Error("Generation timed out. Please try again.");
   };
 
+  const pollRefine = async (jobId) => {
+    for (let i = 0; i < 60; i++) {
+      await sleep(2500);
+      const { data } = await api.get(`/refine/status/${jobId}`);
+      if (data.status === "done") return data;
+      if (data.status === "error") throw new Error(data.error || "Refine failed");
+    }
+    throw new Error("Refine timed out. Please try again.");
+  };
+
   const generate = async () => {
     setError("");
     setGenerating(true);
@@ -189,7 +199,10 @@ export default function Converter() {
       if (!imagePreview && imageUrl) setImagePreview(imageUrl);
       setStep(2);
     } catch (e) {
-      setError(formatApiError(e.response?.data?.detail) || e.message);
+      const msg = e.message || formatApiError(e.response?.data?.detail);
+      setError(msg && msg.includes("Budget")
+        ? "AI credits exhausted. Top up your Universal Key (Profile → Universal Key → Add Balance) and try again."
+        : (formatApiError(e.response?.data?.detail) || msg));
     } finally {
       clearInterval(stageTimer.current);
       setGenerating(false);
@@ -224,13 +237,16 @@ export default function Converter() {
     setChatMessages((m) => [...m, { role: "user", text: instruction }]);
     setRefining(true);
     try {
-      const { data } = await api.post(`/projects/${result.id}/refine`, { instruction, model });
+      const { data: job } = await api.post(`/projects/${result.id}/refine`, { instruction, model });
+      const data = await pollRefine(job.job_id);
       setEditorCode(data.code);
       setVersions(data.versions);
       setCurrentIndex(data.current_index);
       setChatMessages((m) => [...m, { role: "assistant", text: "Done — preview & code updated." }]);
     } catch (e) {
-      setChatMessages((m) => [...m, { role: "assistant", text: formatApiError(e.response?.data?.detail) || "Refine failed." }]);
+      const msg = e.message || formatApiError(e.response?.data?.detail) || "Refine failed.";
+      setChatMessages((m) => [...m, { role: "assistant", text: msg }]);
+      toast.error(msg.includes("Budget") ? "AI credits exhausted — top up your Universal Key." : "Refine failed.");
     } finally {
       setRefining(false);
     }

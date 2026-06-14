@@ -485,34 +485,72 @@ async def generate_status(job_id: str, user: dict = Depends(get_current_user)):
     return resp
 
 
+async def run_refine_job(job_id: str, project_id: str, user_id: str,
+                         instruction: str, model_name: str):
+    try:
+        doc = await db.projects.find_one({"id": project_id, "user_id": user_id})
+        if not doc:
+            raise ValueError("Project not found")
+        provider, model = MODEL_MAP.get(model_name, MODEL_MAP["Claude Sonnet 4.6"])
+        new_code = await refine_code(
+            doc["code"], doc.get("dsl", {}), instruction,
+            doc["framework"], doc["styling"], provider, model,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        versions = doc.get("versions", [{"code": doc["code"], "label": "Initial generation", "created_at": doc["created_at"]}])
+        cur = doc.get("current_index", len(versions) - 1)
+        versions = versions[: cur + 1]
+        versions.append({"code": new_code, "label": instruction, "created_at": now})
+        new_index = len(versions) - 1
+        await db.projects.update_one(
+            {"id": project_id, "user_id": user_id},
+            {"$set": {"code": new_code, "versions": versions, "current_index": new_index}},
+        )
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "done",
+                      "result": {"code": new_code, "versions": versions, "current_index": new_index}}},
+        )
+    except Exception as e:
+        logger.exception("Refine job failed")
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "error", "error": str(e)[:500]}},
+        )
+
+
 @api_router.post("/projects/{project_id}/refine")
-async def refine_project(project_id: str, data: RefineInput, user: dict = Depends(get_current_user)):
-    doc = await db.projects.find_one({"id": project_id, "user_id": str(user["_id"])})
+async def refine_project(project_id: str, data: RefineInput, background_tasks: BackgroundTasks,
+                         user: dict = Depends(get_current_user)):
+    doc = await db.projects.find_one(
+        {"id": project_id, "user_id": str(user["_id"])}, {"_id": 0, "model": 1})
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found")
     model_name = data.model or doc.get("model", "Claude Sonnet 4.6")
-    provider, model = MODEL_MAP.get(model_name, MODEL_MAP["Claude Sonnet 4.6"])
-    try:
-        new_code = await refine_code(
-            doc["code"], doc.get("dsl", {}), data.instruction,
-            doc["framework"], doc["styling"], provider, model,
-        )
-    except Exception as e:
-        logger.exception("Refine failed")
-        raise HTTPException(status_code=500, detail=f"Refine failed: {e}")
+    job_id = str(uuid.uuid4())
+    await db.jobs.insert_one({
+        "id": job_id,
+        "user_id": str(user["_id"]),
+        "kind": "refine",
+        "status": "processing",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    background_tasks.add_task(run_refine_job, job_id, project_id, str(user["_id"]),
+                             data.instruction, model_name)
+    return {"job_id": job_id, "status": "processing"}
 
-    now = datetime.now(timezone.utc).isoformat()
-    versions = doc.get("versions", [{"code": doc["code"], "label": "Initial generation", "created_at": doc["created_at"]}])
-    # truncate any redo-forward history, then append
-    cur = doc.get("current_index", len(versions) - 1)
-    versions = versions[: cur + 1]
-    versions.append({"code": new_code, "label": data.instruction, "created_at": now})
-    new_index = len(versions) - 1
-    await db.projects.update_one(
-        {"id": project_id, "user_id": str(user["_id"])},
-        {"$set": {"code": new_code, "versions": versions, "current_index": new_index}},
-    )
-    return {"code": new_code, "versions": versions, "current_index": new_index}
+
+@api_router.get("/refine/status/{job_id}")
+async def refine_status(job_id: str, user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id, "user_id": str(user["_id"])}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    resp = {"status": job["status"]}
+    if job["status"] == "done":
+        resp.update(job.get("result", {}))
+    elif job["status"] == "error":
+        resp["error"] = job.get("error", "Refine failed")
+    return resp
 
 
 @api_router.post("/projects/{project_id}/restore")
@@ -599,6 +637,12 @@ async def seed_admin():
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.projects.create_index("user_id")
+    await db.jobs.create_index([("id", 1), ("user_id", 1)])
+    # Mark any jobs left 'processing' by a crashed/restarted worker as errored.
+    await db.jobs.update_many(
+        {"status": "processing"},
+        {"$set": {"status": "error", "error": "Worker restarted before completion. Please try again."}},
+    )
     await seed_admin()
 
 
