@@ -86,7 +86,7 @@ export default function Dashboard() {
               {recent.map((p) => (
                 <li key={p.id} className="flex items-center gap-4 px-6 py-4 hover:bg-zinc-900/50 transition-colors">
                   <div className="w-12 h-12 rounded-sm border border-zinc-800 overflow-hidden bg-[#0c0c0e] shrink-0">
-                    <img src={`data:image/png;base64,${p.image_base64}`} alt="" className="w-full h-full object-cover" />
+                    <img src={`data:image/jpeg;base64,${p.thumbnail}`} alt="" className="w-full h-full object-cover" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm text-white truncate">{p.name}</p>

@@ -26,6 +26,17 @@ export default function Projects() {
   };
   useEffect(load, []);
 
+  const openProject = async (p) => {
+    setActive({ ...p, code: "", _loading: true });
+    try {
+      const { data } = await api.get(`/projects/${p.id}`);
+      setActive(data);
+    } catch {
+      toast.error("Could not load project");
+      setActive(null);
+    }
+  };
+
   const remove = async (id, e) => {
     e.stopPropagation();
     await api.delete(`/projects/${id}`);
@@ -81,10 +92,10 @@ export default function Projects() {
         ) : (
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {projects.map((p) => (
-              <div key={p.id} data-testid={`project-card-${p.id}`} onClick={() => setActive(p)}
+              <div key={p.id} data-testid={`project-card-${p.id}`} onClick={() => openProject(p)}
                 className="group bg-card border border-zinc-800 rounded-md overflow-hidden cursor-pointer hover:border-zinc-600 transition-colors">
                 <div className="aspect-video bg-[#0c0c0e] overflow-hidden border-b border-zinc-800">
-                  <img src={`data:image/png;base64,${p.image_base64}`} alt="" className="w-full h-full object-cover" />
+                  <img src={`data:image/jpeg;base64,${p.thumbnail}`} alt="" className="w-full h-full object-cover" />
                 </div>
                 <div className="p-4">
                   <div className="flex items-start justify-between gap-2">
@@ -132,17 +143,19 @@ export default function Projects() {
                   <TabsTrigger value="original"><ImageIcon className="w-4 h-4 mr-2" /> Original</TabsTrigger>
                 </TabsList>
                 <TabsContent value="code" className="overflow-auto flex-1 m-0 mt-3">
-                  <pre className="p-4 text-sm font-mono text-zinc-300 leading-relaxed"><code>{active.code}</code></pre>
+                  <pre className="p-4 text-sm font-mono text-zinc-300 leading-relaxed"><code>{active._loading ? "Loading…" : active.code}</code></pre>
                 </TabsContent>
                 <TabsContent value="preview" className="overflow-auto flex-1 m-0 mt-3">
-                  {active.framework === "HTML/CSS" ? (
+                  {active._loading ? (
+                    <div className="p-12 text-center text-zinc-500">Loading…</div>
+                  ) : active.framework === "HTML/CSS" ? (
                     <iframe title="preview" srcDoc={active.code} sandbox="allow-scripts" className="w-full h-[440px] bg-white rounded-sm" />
                   ) : (
                     <div className="p-12 text-center text-zinc-500">Live preview available for HTML/CSS output.</div>
                   )}
                 </TabsContent>
                 <TabsContent value="original" className="overflow-auto flex-1 m-0 mt-3">
-                  <img src={`data:image/png;base64,${active.image_base64}`} alt="" className="w-full object-contain rounded-sm" />
+                  <img src={`data:image/${active.image_base64 ? "png" : "jpeg"};base64,${active.image_base64 || active.thumbnail}`} alt="" className="w-full object-contain rounded-sm" />
                 </TabsContent>
               </Tabs>
             </>

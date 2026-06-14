@@ -15,6 +15,8 @@ from typing import List, Optional
 import jwt
 import bcrypt
 import requests
+from io import BytesIO
+from PIL import Image
 from bson import ObjectId
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
@@ -130,6 +132,11 @@ class GenerateInput(BaseModel):
     styling: str = "Tailwind CSS"
     prompt: Optional[str] = ""
     name: Optional[str] = None
+    model: str = "Claude Sonnet 4.6"
+
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +186,10 @@ async def me(user: dict = Depends(get_current_user)):
 
 
 @api_router.put("/auth/profile")
-async def update_profile(payload: dict, user: dict = Depends(get_current_user)):
+async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
     updates = {}
-    if "name" in payload and payload["name"]:
-        updates["name"] = payload["name"]
+    if payload.name:
+        updates["name"] = payload.name
     if updates:
         await db.users.update_one({"_id": user["_id"]}, {"$set": updates})
     fresh = await db.users.find_one({"_id": user["_id"]})
@@ -193,10 +200,48 @@ async def update_profile(payload: dict, user: dict = Depends(get_current_user)):
 # Image helpers
 # ---------------------------------------------------------------------------
 
-def fetch_image_as_base64(url: str) -> str:
+def fetch_image_bytes(url: str) -> bytes:
     r = requests.get(url, timeout=20)
     r.raise_for_status()
-    return base64.b64encode(r.content).decode("utf-8")
+    return r.content
+
+
+def _decode_image(b64: str) -> Image.Image:
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[-1]
+    raw = base64.b64decode(b64)
+    img = Image.open(BytesIO(raw))
+    # Use first frame for animated formats (gif/webp)
+    try:
+        img.seek(0)
+    except Exception:
+        pass
+    if img.mode not in ("RGB",):
+        img = img.convert("RGB")
+    return img
+
+
+def normalize_image(b64: str, max_side: int = 1568) -> str:
+    """Re-encode to a clean PNG (resized) so the model reliably accepts it."""
+    img = _decode_image(b64)
+    img.thumbnail((max_side, max_side), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def make_thumbnail(b64: str, max_side: int = 480) -> str:
+    img = _decode_image(b64)
+    img.thumbnail((max_side, max_side), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=72)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+MODEL_MAP = {
+    "Claude Sonnet 4.6": ("anthropic", "claude-sonnet-4-6"),
+    "Gemini 3.1 Pro": ("gemini", "gemini-3.1-pro-preview"),
+}
 
 
 LANG_MAP = {
@@ -246,12 +291,13 @@ def strip_code_fences(text: str) -> str:
     return t
 
 
-async def generate_code(image_b64: str, framework: str, styling: str, extra: str) -> str:
+async def generate_code(image_b64: str, framework: str, styling: str, extra: str,
+                        provider: str, model: str) -> str:
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"ui2code-{uuid.uuid4()}",
         system_message=build_system_prompt(framework, styling, extra),
-    ).with_model("anthropic", "claude-sonnet-4-6")
+    ).with_model(provider, model)
 
     msg = UserMessage(
         text=f"Generate the {framework} ({styling}) code for this design.",
@@ -271,21 +317,27 @@ async def generate_code(image_b64: str, framework: str, styling: str, extra: str
 # ---------------------------------------------------------------------------
 @api_router.post("/generate")
 async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
-    image_b64 = data.image_base64
-    if not image_b64 and data.image_url:
+    raw_b64 = data.image_base64
+    if not raw_b64 and data.image_url:
         try:
-            image_b64 = fetch_image_as_base64(data.image_url)
+            raw_b64 = base64.b64encode(fetch_image_bytes(data.image_url)).decode("utf-8")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Could not fetch image URL: {e}")
-    if not image_b64:
+    if not raw_b64:
         raise HTTPException(status_code=400, detail="No image provided")
 
-    # normalize: strip data URL prefix if present
-    if image_b64.startswith("data:"):
-        image_b64 = image_b64.split(",", 1)[-1]
+    # Normalize to a clean, reasonably-sized PNG so the model reliably accepts it.
+    try:
+        clean_b64 = normalize_image(raw_b64)
+        thumb_b64 = make_thumbnail(raw_b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid or unsupported image: {e}")
+
+    provider, model = MODEL_MAP.get(data.model, MODEL_MAP["Claude Sonnet 4.6"])
 
     try:
-        raw = await generate_code(image_b64, data.framework, data.styling, data.prompt or "")
+        raw = await generate_code(clean_b64, data.framework, data.styling,
+                                  data.prompt or "", provider, model)
     except Exception as e:
         logger.exception("Generation failed")
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
@@ -299,21 +351,26 @@ async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
         "name": data.name or f"Untitled • {data.framework}",
         "framework": data.framework,
         "styling": data.styling,
+        "model": data.model,
         "prompt": data.prompt or "",
-        "image_base64": image_b64,
+        "image_base64": clean_b64,
+        "thumbnail": thumb_b64,
         "code": code,
         "language": language,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.projects.insert_one({**project})
     project.pop("_id", None)
+    project.pop("image_base64", None)  # keep response light; preview uses local image
     return project
 
 
 @api_router.get("/projects")
 async def list_projects(user: dict = Depends(get_current_user)):
+    # Exclude heavy fields (full image + code) for a fast list view.
     docs = await db.projects.find(
-        {"user_id": str(user["_id"])}, {"_id": 0}
+        {"user_id": str(user["_id"])},
+        {"_id": 0, "image_base64": 0, "code": 0},
     ).sort("created_at", -1).to_list(200)
     return docs
 

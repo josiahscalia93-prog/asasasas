@@ -16,6 +16,7 @@ import {
 
 const FRAMEWORKS = ["React", "Vue 3", "Next.js", "HTML/CSS"];
 const STYLES = ["Tailwind CSS", "CSS Modules", "Styled Components", "Plain CSS"];
+const MODELS = ["Claude Sonnet 4.6", "Gemini 3.1 Pro"];
 const EXT = { React: "jsx", "Vue 3": "vue", "Next.js": "jsx", "HTML/CSS": "html" };
 
 const STEPS = ["Upload", "Configure", "Result"];
@@ -55,6 +56,7 @@ export default function Converter() {
 
   const [framework, setFramework] = useState("React");
   const [styling, setStyling] = useState("Tailwind CSS");
+  const [model, setModel] = useState("Claude Sonnet 4.6");
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
 
@@ -116,13 +118,13 @@ export default function Converter() {
     }, 4000);
     try {
       const payload = {
-        framework, styling, prompt,
+        framework, styling, prompt, model,
         name: name || `Untitled • ${framework}`,
         ...(mode === "upload" ? { image_base64: imageB64 } : { image_url: imageUrl.trim() }),
       };
       const { data } = await api.post("/generate", payload);
       setResult(data);
-      if (!imagePreview) setImagePreview(`data:image/png;base64,${data.image_base64}`);
+      if (!imagePreview && imageUrl) setImagePreview(imageUrl);
       setStep(2);
     } catch (e) {
       setError(formatApiError(e.response?.data?.detail) || e.message);
@@ -151,7 +153,7 @@ export default function Converter() {
 
   const reset = () => {
     setStep(0); setMode("upload"); clearImage(); setFramework("React");
-    setStyling("Tailwind CSS"); setPrompt(""); setName(""); setResult(null); setError("");
+    setStyling("Tailwind CSS"); setModel("Claude Sonnet 4.6"); setPrompt(""); setName(""); setResult(null); setError("");
   };
 
   const isHtml = result?.framework === "HTML/CSS";
@@ -281,6 +283,17 @@ export default function Converter() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-2">
+                <Label className="text-xs uppercase tracking-[0.15em] text-zinc-500">AI model</Label>
+                <Select value={model} onValueChange={setModel}>
+                  <SelectTrigger data-testid="model-select" className="bg-[#0c0c0e] border-zinc-800 rounded-sm h-11">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MODELS.map((m) => <SelectItem key={m} value={m} data-testid={`md-${m}`}>{m}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="md:col-span-2 space-y-2">
                 <Label className="text-xs uppercase tracking-[0.15em] text-zinc-500">Extra context (optional)</Label>
                 <Textarea data-testid="prompt-input" value={prompt} onChange={(e) => setPrompt(e.target.value)}
@@ -314,7 +327,7 @@ export default function Converter() {
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="font-heading text-xl font-bold tracking-tight">{result.name}</h2>
-                <p className="text-sm text-zinc-500">{result.framework} · {result.styling}</p>
+                <p className="text-sm text-zinc-500">{result.framework} · {result.styling} · {result.model}</p>
               </div>
               <div className="flex gap-2">
                 <Button data-testid="copy-code-btn" onClick={copyCode} variant="outline"
