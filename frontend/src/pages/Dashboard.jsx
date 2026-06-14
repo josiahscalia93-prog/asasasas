@@ -4,7 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
-import { Wand2, FolderGit2, Layers, ArrowRight, Clock, Plus } from "lucide-react";
+import { Wand2, FolderGit2, Layers, ArrowRight, Clock, Plus, Gauge, Infinity as InfinityIcon } from "lucide-react";
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -45,6 +45,39 @@ export default function Dashboard() {
               <Plus className="w-4 h-4 mr-2" /> New conversion
             </Button>
           </Link>
+        </div>
+
+        {/* Quota meter */}
+        <div data-testid="quota-meter" className="bg-card border border-zinc-800 rounded-md p-6 mb-8">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Gauge className="w-4 h-4 text-signal" />
+              <span className="text-xs uppercase tracking-[0.15em] text-zinc-500 font-bold">Monthly usage</span>
+            </div>
+            <span className="text-xs text-zinc-400 border border-zinc-700 rounded-full px-2.5 py-0.5">{stats.plan || "Free"} plan</span>
+          </div>
+          {stats.month_limit == null ? (
+            <p className="font-heading text-2xl font-black mt-4 tracking-tight flex items-center gap-2">
+              <InfinityIcon className="w-6 h-6 text-signal" /> Unlimited
+              <span className="text-sm font-normal text-zinc-500">· {loading ? "—" : stats.month_used} this month</span>
+            </p>
+          ) : (
+            <>
+              <p className="font-heading text-2xl font-black mt-4 tracking-tight">
+                {loading ? "—" : stats.month_used}<span className="text-zinc-600"> / {stats.month_limit}</span>
+                <span className="text-sm font-normal text-zinc-500"> generations this month</span>
+              </p>
+              <div className="h-2 bg-zinc-800 rounded-full overflow-hidden mt-3">
+                <div className="h-full bg-signal transition-all duration-500"
+                  style={{ width: `${Math.min(100, Math.round(((stats.month_used || 0) / (stats.month_limit || 1)) * 100))}%` }} />
+              </div>
+              {!loading && stats.month_used >= stats.month_limit && (
+                <p className="text-xs text-signal mt-2">
+                  Limit reached. <Link to="/pricing" className="underline">Upgrade to Pro</Link> for unlimited.
+                </p>
+              )}
+            </>
+          )}
         </div>
 
         {/* Stat cards */}

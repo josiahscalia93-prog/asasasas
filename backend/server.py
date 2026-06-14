@@ -195,6 +195,29 @@ async def me(user: dict = Depends(get_current_user)):
     return public_user(user)
 
 
+@api_router.post("/auth/refresh")
+async def refresh_token_route(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="No refresh token")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    uid = str(user["_id"])
+    access = create_access_token(uid, user["email"])
+    response.set_cookie("access_token", access, httponly=True, secure=False,
+                        samesite="lax", max_age=3600, path="/")
+    return public_user(user)
+
+
 @api_router.put("/auth/profile")
 async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
     updates = {}
@@ -253,6 +276,18 @@ MODEL_MAP = {
     "Gemini 3.1 Pro": ("gemini", "gemini-3.1-pro-preview"),
     "GPT-4o": ("openai", "gpt-4o"),
 }
+
+PLAN_LIMITS = {"Free": 20, "Pro": None, "Team": None}  # None = unlimited
+
+
+def month_start_iso() -> str:
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+async def usage_this_month(user_id: str) -> int:
+    return await db.projects.count_documents(
+        {"user_id": user_id, "created_at": {"$gte": month_start_iso()}})
 
 
 LANG_MAP = {
@@ -447,6 +482,16 @@ async def generate(data: GenerateInput, background_tasks: BackgroundTasks,
     if not data.image_base64 and not data.image_url:
         raise HTTPException(status_code=400, detail="No image provided")
 
+    # Enforce monthly quota for limited plans (Free).
+    limit = PLAN_LIMITS.get(user.get("plan", "Free"), 20)
+    if limit is not None:
+        used = await usage_this_month(str(user["_id"]))
+        if used >= limit:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Monthly limit reached ({limit} generations on the {user.get('plan', 'Free')} plan). Upgrade to Pro for unlimited.",
+            )
+
     job_id = str(uuid.uuid4())
     await db.jobs.insert_one({
         "id": job_id,
@@ -604,7 +649,16 @@ async def stats(user: dict = Depends(get_current_user)):
     async for d in db.projects.find({"user_id": uid}, {"framework": 1, "_id": 0}):
         fw = d.get("framework", "Other")
         by_framework[fw] = by_framework.get(fw, 0) + 1
-    return {"total": total, "by_framework": by_framework}
+    plan = user.get("plan", "Free")
+    limit = PLAN_LIMITS.get(plan, 20)
+    used = await usage_this_month(uid)
+    return {
+        "total": total,
+        "by_framework": by_framework,
+        "plan": plan,
+        "month_used": used,
+        "month_limit": limit,  # None = unlimited
+    }
 
 
 @api_router.get("/")

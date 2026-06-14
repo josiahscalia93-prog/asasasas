@@ -58,6 +58,11 @@ Build a homepage, login, signup, dashboard, and all website pages for the upload
 - Hardened jobs: index on (id,user_id), stale 'processing' jobs marked errored on startup. Budget errors surfaced with a clear "top up Universal Key" message.
 - Verified: backend async generate + async refine end-to-end (curl); frontend compiles clean.
 
+## Iteration 4 (2026-06-14) — Auth refresh fix + quota meter + loading hint
+- **Fixed "Not authenticated" on Configure/Generate**: root cause was the 1-hour access token expiring with no refresh flow. Added `POST /api/auth/refresh` (uses the 7-day refresh cookie) + an axios response interceptor that transparently refreshes on 401 and retries once. Verified refresh works with only the refresh cookie present.
+- **Dashboard quota meter**: `/api/stats` now returns `plan`, `month_used`, `month_limit`; dashboard shows a monthly usage bar (Free = 20/mo, Pro/Team unlimited). Free plan soft-enforced in `/api/generate` (403 when over).
+- **Generating loading hint**: converter loading screen shows elapsed seconds + ~90s progress estimate bar.
+
 ## Known external issue
 - EMERGENT_LLM_KEY (Universal Key) hit its budget cap during testing ("Budget exceeded: cost 1.46 > 1.4"). User must top up: Profile → Universal Key → Add Balance. Default model is Claude Sonnet 4.6; GPT-4o/Gemini also draw from the same balance.
 - Google + GitHub OAuth social login.

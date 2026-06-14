@@ -67,6 +67,7 @@ export default function Converter() {
 
   const [generating, setGenerating] = useState(false);
   const [genStage, setGenStage] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -81,9 +82,10 @@ export default function Converter() {
 
   const fileRef = useRef(null);
   const stageTimer = useRef(null);
+  const elapsedTimer = useRef(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  useEffect(() => () => clearInterval(stageTimer.current), []);
+  useEffect(() => () => { clearInterval(stageTimer.current); clearInterval(elapsedTimer.current); }, []);
 
   // Load a saved project straight into the playground ("Open in editor")
   useEffect(() => {
@@ -180,9 +182,11 @@ export default function Converter() {
     setError("");
     setGenerating(true);
     setGenStage(0);
+    setElapsed(0);
     stageTimer.current = setInterval(() => {
       setGenStage((s) => (s < GEN_STAGES.length - 1 ? s + 1 : s));
     }, 4000);
+    elapsedTimer.current = setInterval(() => setElapsed((e) => e + 1), 1000);
     try {
       const payload = {
         framework, styling, prompt, model,
@@ -205,6 +209,7 @@ export default function Converter() {
         : (formatApiError(e.response?.data?.detail) || msg));
     } finally {
       clearInterval(stageTimer.current);
+      clearInterval(elapsedTimer.current);
       setGenerating(false);
     }
   };
@@ -290,7 +295,22 @@ export default function Converter() {
               <span className="w-1.5 h-1.5 rounded-full bg-signal dot-3" />
             </div>
             <p className="mt-6 font-heading text-lg font-bold">{GEN_STAGES[genStage]}…</p>
-            <p className="text-sm text-zinc-500 mt-1">Claude is reading your design pixel by pixel.</p>
+            <p className="text-sm text-zinc-500 mt-1">{model} is reading your design pixel by pixel.</p>
+
+            {/* Progress estimate (~90s for full-page screenshots) */}
+            <div className="w-full max-w-sm mt-7">
+              <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-signal transition-all duration-1000 ease-linear"
+                  style={{ width: `${Math.min(95, Math.round((elapsed / 90) * 100))}%` }}
+                  data-testid="gen-progress-bar"
+                />
+              </div>
+              <div className="flex justify-between mt-2 text-xs text-zinc-500">
+                <span data-testid="gen-elapsed">{elapsed}s elapsed</span>
+                <span>{elapsed < 90 ? "est. ~90s" : "almost there…"}</span>
+              </div>
+            </div>
           </div>
         )}
 
