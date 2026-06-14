@@ -7,6 +7,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import LivePreview from "@/components/LivePreview";
 import {
   Trash2, Copy, Check, Download, Code2, Eye, ImageIcon, Plus, Wand2,
 } from "lucide-react";
@@ -148,10 +149,10 @@ export default function Projects() {
                 <TabsContent value="preview" className="overflow-auto flex-1 m-0 mt-3">
                   {active._loading ? (
                     <div className="p-12 text-center text-zinc-500">Loading…</div>
-                  ) : active.framework === "HTML/CSS" ? (
-                    <iframe title="preview" srcDoc={active.code} sandbox="allow-scripts" className="w-full h-[440px] bg-white rounded-sm" />
                   ) : (
-                    <div className="p-12 text-center text-zinc-500">Live preview available for HTML/CSS output.</div>
+                    <div className="h-[440px] rounded-sm overflow-hidden border border-zinc-800">
+                      <LivePreview framework={active.framework} code={active.code} />
+                    </div>
                   )}
                 </TabsContent>
                 <TabsContent value="original" className="overflow-auto flex-1 m-0 mt-3">

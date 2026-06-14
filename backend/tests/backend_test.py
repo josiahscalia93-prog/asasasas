@@ -148,8 +148,9 @@ class TestGenerate:
             "styling": "Tailwind CSS",
             "prompt": "Keep it minimal",
             "name": "TEST HTML Project",
+            "model": "Claude Sonnet 4.6",
         }
-        r = admin_session.post(f"{API}/generate", json=payload, timeout=120)
+        r = admin_session.post(f"{API}/generate", json=payload, timeout=180)
         assert r.status_code == 200, f"Generate failed: {r.status_code} {r.text[:300]}"
         body = r.json()
         assert "id" in body
@@ -158,8 +159,99 @@ class TestGenerate:
         assert isinstance(body["code"], str) and len(body["code"]) > 50
         # ensure no _id leaked
         assert "_id" not in body
+        # New DSL pipeline checks
+        assert "dsl" in body and isinstance(body["dsl"], dict)
+        assert ("tree" in body["dsl"]) or ("meta" in body["dsl"]) or ("raw" in body["dsl"])
+        # versions array
+        assert isinstance(body["versions"], list) and len(body["versions"]) == 1
+        assert body["current_index"] == 0
+        assert body["versions"][0]["code"] == body["code"]
+        # thumbnail present
+        assert isinstance(body.get("thumbnail"), str) and len(body["thumbnail"]) > 100
+        # image_base64 stripped from response
+        assert "image_base64" not in body
         # Persist project id for downstream tests
         pytest.html_project_id = body["id"]
+
+    def test_generate_with_gpt4o(self, admin_session, sample_image_b64):
+        """Verify GPT-4o model option works in /api/generate."""
+        payload = {
+            "image_base64": sample_image_b64,
+            "framework": "HTML/CSS",
+            "styling": "Tailwind CSS",
+            "name": "TEST GPT4o Project",
+            "model": "GPT-4o",
+        }
+        r = admin_session.post(f"{API}/generate", json=payload, timeout=180)
+        assert r.status_code == 200, f"GPT-4o generate failed: {r.status_code} {r.text[:300]}"
+        body = r.json()
+        assert isinstance(body["code"], str) and len(body["code"]) > 50
+        assert body["model"] == "GPT-4o"
+        pytest.gpt4o_project_id = body["id"]
+
+    def test_refine_updates_code_and_versions(self, admin_session):
+        pid = getattr(pytest, "html_project_id", None)
+        assert pid
+        # Capture before
+        before = admin_session.get(f"{API}/projects/{pid}", timeout=15).json()
+        before_code = before["code"]
+        before_versions = len(before["versions"])
+        before_index = before["current_index"]
+
+        r = admin_session.post(
+            f"{API}/projects/{pid}/refine",
+            json={"instruction": "Change the main heading text to 'Hello World TEST'",
+                  "model": "Claude Sonnet 4.6"},
+            timeout=180,
+        )
+        assert r.status_code == 200, f"Refine failed: {r.status_code} {r.text[:300]}"
+        body = r.json()
+        assert isinstance(body["code"], str) and len(body["code"]) > 50
+        # versions length grew by 1, index incremented
+        assert len(body["versions"]) == before_versions + 1
+        assert body["current_index"] == before_index + 1
+        # code actually changed
+        assert body["code"] != before_code
+
+        # GET to verify persistence
+        fresh = admin_session.get(f"{API}/projects/{pid}", timeout=15).json()
+        assert fresh["code"] == body["code"]
+        assert fresh["current_index"] == body["current_index"]
+        assert len(fresh["versions"]) == len(body["versions"])
+
+    def test_restore_previous_version(self, admin_session):
+        pid = getattr(pytest, "html_project_id", None)
+        assert pid
+        cur = admin_session.get(f"{API}/projects/{pid}", timeout=15).json()
+        assert cur["current_index"] >= 1, "Need a prior refine for restore test"
+        target_index = 0
+        target_code = cur["versions"][target_index]["code"]
+        r = admin_session.post(f"{API}/projects/{pid}/restore", json={"index": target_index}, timeout=15)
+        assert r.status_code == 200, f"Restore failed: {r.status_code} {r.text[:300]}"
+        body = r.json()
+        assert body["current_index"] == target_index
+        assert body["code"] == target_code
+        # Verify persistence
+        fresh = admin_session.get(f"{API}/projects/{pid}", timeout=15).json()
+        assert fresh["current_index"] == target_index
+        assert fresh["code"] == target_code
+
+    def test_restore_invalid_index(self, admin_session):
+        pid = getattr(pytest, "html_project_id", None)
+        assert pid
+        r = admin_session.post(f"{API}/projects/{pid}/restore", json={"index": 999}, timeout=10)
+        assert r.status_code == 400
+
+    def test_projects_list_excludes_heavy_fields(self, admin_session):
+        r = admin_session.get(f"{API}/projects", timeout=15)
+        assert r.status_code == 200
+        items = r.json()
+        assert isinstance(items, list)
+        for p in items:
+            assert "image_base64" not in p, "list endpoint should exclude image_base64"
+            assert "code" not in p, "list endpoint should exclude full code"
+        # At least one new project must have a thumbnail (newly created in this run)
+        assert any("thumbnail" in p for p in items), "no projects have thumbnail field"
 
     def test_projects_lists_generated(self, admin_session):
         r = admin_session.get(f"{API}/projects", timeout=15)
@@ -174,7 +266,12 @@ class TestGenerate:
         assert pid
         r = admin_session.get(f"{API}/projects/{pid}", timeout=15)
         assert r.status_code == 200
-        assert r.json()["id"] == pid
+        body = r.json()
+        assert body["id"] == pid
+        # Full doc returned, including dsl, versions, code
+        assert "code" in body
+        assert "dsl" in body
+        assert "versions" in body
 
     def test_stats_increment(self, admin_session):
         r = admin_session.get(f"{API}/stats", timeout=10)

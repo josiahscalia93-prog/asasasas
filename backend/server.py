@@ -5,6 +5,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import json
 import uuid
 import base64
 import logging
@@ -135,6 +136,15 @@ class GenerateInput(BaseModel):
     model: str = "Claude Sonnet 4.6"
 
 
+class RefineInput(BaseModel):
+    instruction: str
+    model: Optional[str] = None
+
+
+class RestoreInput(BaseModel):
+    index: int
+
+
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
 
@@ -241,6 +251,7 @@ def make_thumbnail(b64: str, max_side: int = 480) -> str:
 MODEL_MAP = {
     "Claude Sonnet 4.6": ("anthropic", "claude-sonnet-4-6"),
     "Gemini 3.1 Pro": ("gemini", "gemini-3.1-pro-preview"),
+    "GPT-4o": ("openai", "gpt-4o"),
 }
 
 
@@ -252,21 +263,28 @@ LANG_MAP = {
 }
 
 
-def build_system_prompt(framework: str, styling: str, extra: str) -> str:
+def build_system_prompt(framework: str, styling: str, extra: str, dsl: Optional[dict] = None) -> str:
     base = (
         f"You are a senior frontend engineer specializing in pixel-perfect UI implementation. "
-        f"Convert the provided UI design image into clean, production-ready {framework} code "
+        f"Convert the UI design into clean, production-ready {framework} code "
         f"styled with {styling}. Requirements:\n"
         f"- Match layout, spacing, colors, and typography as closely as possible.\n"
         f"- Make it fully responsive and accessible (semantic HTML, aria where relevant).\n"
-        f"- Use placeholder text/links only where the image is unclear.\n"
+        f"- Use placeholder images from https://placehold.co for any image regions.\n"
     )
     if framework == "HTML/CSS":
         base += ("- Return a SINGLE complete, self-contained HTML document (with <!DOCTYPE html>, "
                  "<head> including any CSS, and <body>) so it can render directly in an iframe. "
                  "If using Tailwind CSS, include the Tailwind CDN script tag.\n")
-    else:
-        base += "- Return a single complete component file.\n"
+    elif framework in ("React", "Next.js"):
+        base += ("- Return a SINGLE self-contained React component file. Default-export a component named `App`. "
+                 "Do not include import statements for CSS. If using Tailwind, assume Tailwind is available. "
+                 "Inline any helper components in the same file.\n")
+    elif framework == "Vue 3":
+        base += "- Return a SINGLE Vue 3 Single File Component (<template>, <script setup>, <style>).\n"
+    if dsl:
+        base += ("\nUse this structured component specification (DSL) as the source of truth for layout, "
+                 "text content, and styles:\n" + json.dumps(dsl)[:6000] + "\n")
     if extra:
         base += f"\nAdditional instructions from the user: {extra}\n"
     base += "\nOutput ONLY the code inside one fenced code block. No explanations before or after."
@@ -277,11 +295,9 @@ def strip_code_fences(text: str) -> str:
     t = text.strip()
     if "```" in t:
         parts = t.split("```")
-        # take the largest fenced block
         candidates = []
         for i in range(1, len(parts), 2):
             block = parts[i]
-            # remove leading language token line
             lines = block.split("\n", 1)
             if lines and lines[0].strip().isalpha():
                 block = lines[1] if len(lines) > 1 else ""
@@ -291,25 +307,85 @@ def strip_code_fences(text: str) -> str:
     return t
 
 
-async def generate_code(image_b64: str, framework: str, styling: str, extra: str,
-                        provider: str, model: str) -> str:
+def extract_json(text: str) -> dict:
+    t = text.strip()
+    if "```" in t:
+        for part in t.split("```"):
+            p = part.strip()
+            if p.startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("{"):
+                t = p
+                break
+    start, end = t.find("{"), t.rfind("}")
+    if start != -1 and end != -1:
+        t = t[start:end + 1]
+    try:
+        return json.loads(t)
+    except Exception:
+        return {"raw": text[:4000]}
+
+
+async def _run_chat(system_message: str, user_msg: UserMessage, provider: str, model: str) -> str:
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"ui2code-{uuid.uuid4()}",
-        system_message=build_system_prompt(framework, styling, extra),
+        system_message=system_message,
     ).with_model(provider, model)
-
-    msg = UserMessage(
-        text=f"Generate the {framework} ({styling}) code for this design.",
-        file_contents=[ImageContent(image_base64=image_b64)],
-    )
     collected = ""
-    async for ev in chat.stream_message(msg):
+    async for ev in chat.stream_message(user_msg):
         if isinstance(ev, TextDelta):
             collected += ev.content
         elif isinstance(ev, StreamDone):
             break
     return collected
+
+
+DSL_SYSTEM = (
+    "You are a UI vision analyst. Analyze the provided UI design image and produce a structured JSON "
+    "component tree describing the layout. Extract: detected elements (navbar, hero, button, input, card, "
+    "grid, image, text, footer, etc.), their text content (OCR), nesting/hierarchy, and inferred styles "
+    "(colors as hex, font sizes, font weights, spacing, border radius, shadows, alignment). "
+    "Return ONLY valid JSON of the form: "
+    '{"meta":{"name":"...","theme":"light|dark","primaryColor":"#hex","fontFamily":"..."},'
+    '"tree":[{"type":"...","text":"...","styles":{...},"children":[...]}]}. No prose.'
+)
+
+
+async def analyze_to_dsl(image_b64: str, provider: str, model: str) -> dict:
+    msg = UserMessage(
+        text="Analyze this UI design and return the JSON component tree.",
+        file_contents=[ImageContent(image_base64=image_b64)],
+    )
+    raw = await _run_chat(DSL_SYSTEM, msg, provider, model)
+    return extract_json(raw)
+
+
+async def synthesize_code(dsl: dict, framework: str, styling: str, extra: str,
+                          image_b64: str, provider: str, model: str) -> str:
+    system = build_system_prompt(framework, styling, extra, dsl)
+    msg = UserMessage(
+        text=f"Generate the {framework} ({styling}) code for this design, matching the spec and image.",
+        file_contents=[ImageContent(image_base64=image_b64)],
+    )
+    raw = await _run_chat(system, msg, provider, model)
+    return strip_code_fences(raw)
+
+
+async def refine_code(current_code: str, dsl: dict, instruction: str, framework: str,
+                      styling: str, provider: str, model: str) -> str:
+    system = (
+        f"You are an expert {framework} engineer making a surgical edit to existing code. "
+        f"Apply ONLY the requested change while preserving everything else. Keep the same framework "
+        f"({framework}) and styling approach ({styling}). "
+        f"Return ONLY the complete updated code inside one fenced code block, no explanations.\n\n"
+        f"Component spec (DSL) for context:\n{json.dumps(dsl)[:4000]}"
+    )
+    msg = UserMessage(
+        text=f"Current code:\n```\n{current_code}\n```\n\nRequested change: {instruction}",
+    )
+    raw = await _run_chat(system, msg, provider, model)
+    return strip_code_fences(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +402,6 @@ async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
     if not raw_b64:
         raise HTTPException(status_code=400, detail="No image provided")
 
-    # Normalize to a clean, reasonably-sized PNG so the model reliably accepts it.
     try:
         clean_b64 = normalize_image(raw_b64)
         thumb_b64 = make_thumbnail(raw_b64)
@@ -336,14 +411,18 @@ async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
     provider, model = MODEL_MAP.get(data.model, MODEL_MAP["Claude Sonnet 4.6"])
 
     try:
-        raw = await generate_code(clean_b64, data.framework, data.styling,
-                                  data.prompt or "", provider, model)
+        # Step 1: vision -> DSL component tree
+        dsl = await analyze_to_dsl(clean_b64, provider, model)
+        # Step 2: DSL + image -> framework code
+        code = await synthesize_code(dsl, data.framework, data.styling,
+                                     data.prompt or "", clean_b64, provider, model)
     except Exception as e:
         logger.exception("Generation failed")
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
-    code = strip_code_fences(raw)
     language = LANG_MAP.get(data.framework, "jsx")
+    now = datetime.now(timezone.utc).isoformat()
+    version0 = {"code": code, "label": "Initial generation", "created_at": now}
 
     project = {
         "id": str(uuid.uuid4()),
@@ -355,14 +434,63 @@ async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
         "prompt": data.prompt or "",
         "image_base64": clean_b64,
         "thumbnail": thumb_b64,
+        "dsl": dsl,
         "code": code,
         "language": language,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "versions": [version0],
+        "current_index": 0,
+        "created_at": now,
     }
     await db.projects.insert_one({**project})
     project.pop("_id", None)
-    project.pop("image_base64", None)  # keep response light; preview uses local image
+    project.pop("image_base64", None)
     return project
+
+
+@api_router.post("/projects/{project_id}/refine")
+async def refine_project(project_id: str, data: RefineInput, user: dict = Depends(get_current_user)):
+    doc = await db.projects.find_one({"id": project_id, "user_id": str(user["_id"])})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    model_name = data.model or doc.get("model", "Claude Sonnet 4.6")
+    provider, model = MODEL_MAP.get(model_name, MODEL_MAP["Claude Sonnet 4.6"])
+    try:
+        new_code = await refine_code(
+            doc["code"], doc.get("dsl", {}), data.instruction,
+            doc["framework"], doc["styling"], provider, model,
+        )
+    except Exception as e:
+        logger.exception("Refine failed")
+        raise HTTPException(status_code=500, detail=f"Refine failed: {e}")
+
+    now = datetime.now(timezone.utc).isoformat()
+    versions = doc.get("versions", [{"code": doc["code"], "label": "Initial generation", "created_at": doc["created_at"]}])
+    # truncate any redo-forward history, then append
+    cur = doc.get("current_index", len(versions) - 1)
+    versions = versions[: cur + 1]
+    versions.append({"code": new_code, "label": data.instruction, "created_at": now})
+    new_index = len(versions) - 1
+    await db.projects.update_one(
+        {"id": project_id, "user_id": str(user["_id"])},
+        {"$set": {"code": new_code, "versions": versions, "current_index": new_index}},
+    )
+    return {"code": new_code, "versions": versions, "current_index": new_index}
+
+
+@api_router.post("/projects/{project_id}/restore")
+async def restore_version(project_id: str, data: RestoreInput, user: dict = Depends(get_current_user)):
+    doc = await db.projects.find_one({"id": project_id, "user_id": str(user["_id"])})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    versions = doc.get("versions", [])
+    if not (0 <= data.index < len(versions)):
+        raise HTTPException(status_code=400, detail="Invalid version index")
+    code = versions[data.index]["code"]
+    await db.projects.update_one(
+        {"id": project_id, "user_id": str(user["_id"])},
+        {"$set": {"code": code, "current_index": data.index}},
+    )
+    return {"code": code, "current_index": data.index}
 
 
 @api_router.get("/projects")

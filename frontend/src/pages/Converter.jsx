@@ -9,14 +9,16 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import CodeEditor from "@/components/CodeEditor";
+import LivePreview from "@/components/LivePreview";
 import {
   Upload, Link2, ImageIcon, X, Wand2, ArrowLeft, RotateCcw, Copy, Check,
-  Download, AlertCircle, Code2, Eye, Loader2,
+  Download, AlertCircle, Code2, Eye, Loader2, Undo2, Redo2, Send, Braces, Sparkles,
 } from "lucide-react";
 
 const FRAMEWORKS = ["React", "Vue 3", "Next.js", "HTML/CSS"];
 const STYLES = ["Tailwind CSS", "CSS Modules", "Styled Components", "Plain CSS"];
-const MODELS = ["Claude Sonnet 4.6", "Gemini 3.1 Pro"];
+const MODELS = ["Claude Sonnet 4.6", "Gemini 3.1 Pro", "GPT-4o"];
 const EXT = { React: "jsx", "Vue 3": "vue", "Next.js": "jsx", "HTML/CSS": "html" };
 
 const STEPS = ["Upload", "Configure", "Result"];
@@ -65,6 +67,15 @@ export default function Converter() {
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
+
+  // IDE / refinement state
+  const [editorCode, setEditorCode] = useState("");
+  const [versions, setVersions] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [refining, setRefining] = useState(false);
+
   const fileRef = useRef(null);
   const stageTimer = useRef(null);
 
@@ -124,6 +135,10 @@ export default function Converter() {
       };
       const { data } = await api.post("/generate", payload);
       setResult(data);
+      setEditorCode(data.code);
+      setVersions(data.versions || [{ code: data.code, label: "Initial generation" }]);
+      setCurrentIndex(data.current_index ?? 0);
+      setChatMessages([]);
       if (!imagePreview && imageUrl) setImagePreview(imageUrl);
       setStep(2);
     } catch (e) {
@@ -135,14 +150,14 @@ export default function Converter() {
   };
 
   const copyCode = async () => {
-    await navigator.clipboard.writeText(result.code);
+    await navigator.clipboard.writeText(editorCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
 
   const downloadCode = () => {
     const ext = EXT[result.framework] || "txt";
-    const blob = new Blob([result.code], { type: "text/plain" });
+    const blob = new Blob([editorCode], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -151,16 +166,43 @@ export default function Converter() {
     URL.revokeObjectURL(url);
   };
 
-  const reset = () => {
-    setStep(0); setMode("upload"); clearImage(); setFramework("React");
-    setStyling("Tailwind CSS"); setModel("Claude Sonnet 4.6"); setPrompt(""); setName(""); setResult(null); setError("");
+  const sendRefine = async () => {
+    const instruction = chatInput.trim();
+    if (!instruction || refining) return;
+    setChatInput("");
+    setChatMessages((m) => [...m, { role: "user", text: instruction }]);
+    setRefining(true);
+    try {
+      const { data } = await api.post(`/projects/${result.id}/refine`, { instruction, model });
+      setEditorCode(data.code);
+      setVersions(data.versions);
+      setCurrentIndex(data.current_index);
+      setChatMessages((m) => [...m, { role: "assistant", text: "Done — preview & code updated." }]);
+    } catch (e) {
+      setChatMessages((m) => [...m, { role: "assistant", text: formatApiError(e.response?.data?.detail) || "Refine failed." }]);
+    } finally {
+      setRefining(false);
+    }
   };
 
-  const isHtml = result?.framework === "HTML/CSS";
+  const restore = async (index) => {
+    if (index < 0 || index >= versions.length || refining) return;
+    try {
+      const { data } = await api.post(`/projects/${result.id}/restore`, { index });
+      setEditorCode(data.code);
+      setCurrentIndex(data.current_index);
+    } catch {}
+  };
+
+  const reset = () => {
+    setStep(0); setMode("upload"); clearImage(); setFramework("React");
+    setStyling("Tailwind CSS"); setModel("Claude Sonnet 4.6"); setPrompt(""); setName("");
+    setResult(null); setError(""); setEditorCode(""); setVersions([]); setCurrentIndex(0); setChatMessages([]);
+  };
 
   return (
     <DashboardLayout title="Converter">
-      <div className="max-w-6xl">
+      <div className={step === 2 ? "max-w-7xl" : "max-w-6xl"}>
         <Stepper step={step} />
 
         {error && (
@@ -321,15 +363,29 @@ export default function Converter() {
           </div>
         )}
 
-        {/* STEP 2 — RESULT */}
+        {/* STEP 2 — PLAYGROUND IDE */}
         {!generating && step === 2 && result && (
           <div className="animate-fade-up">
-            <div className="flex items-center justify-between mb-4">
+            {/* Toolbar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
               <div>
                 <h2 className="font-heading text-xl font-bold tracking-tight">{result.name}</h2>
                 <p className="text-sm text-zinc-500">{result.framework} · {result.styling} · {result.model}</p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
+                <div className="flex items-center border border-zinc-800 rounded-sm">
+                  <button data-testid="undo-btn" onClick={() => restore(currentIndex - 1)} disabled={currentIndex <= 0}
+                    title="Undo" className="px-2.5 h-10 text-zinc-300 hover:text-white disabled:opacity-30 transition-colors">
+                    <Undo2 className="w-4 h-4" />
+                  </button>
+                  <span className="text-xs text-zinc-500 px-2 border-x border-zinc-800 h-10 flex items-center" data-testid="version-indicator">
+                    v{currentIndex + 1}/{versions.length}
+                  </span>
+                  <button data-testid="redo-btn" onClick={() => restore(currentIndex + 1)} disabled={currentIndex >= versions.length - 1}
+                    title="Redo" className="px-2.5 h-10 text-zinc-300 hover:text-white disabled:opacity-30 transition-colors">
+                    <Redo2 className="w-4 h-4" />
+                  </button>
+                </div>
                 <Button data-testid="copy-code-btn" onClick={copyCode} variant="outline"
                   className="border-zinc-700 bg-transparent hover:bg-zinc-900 text-white rounded-sm h-10">
                   {copied ? <><Check className="w-4 h-4 mr-2 text-signal" /> Copied</> : <><Copy className="w-4 h-4 mr-2" /> Copy</>}
@@ -345,45 +401,103 @@ export default function Converter() {
               </div>
             </div>
 
-            <Tabs defaultValue="code" className="bg-card border border-zinc-800 rounded-md overflow-hidden">
-              <TabsList className="bg-[#0c0c0e] border-b border-zinc-800 rounded-none w-full justify-start h-11 p-0">
-                <TabsTrigger value="code" data-testid="tab-code" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
-                  <Code2 className="w-4 h-4 mr-2" /> Code
-                </TabsTrigger>
-                <TabsTrigger value="preview" data-testid="tab-preview" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
-                  <Eye className="w-4 h-4 mr-2" /> Preview
-                </TabsTrigger>
-                <TabsTrigger value="original" data-testid="tab-original" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
-                  <ImageIcon className="w-4 h-4 mr-2" /> Original
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="code" className="m-0">
-                <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-[#0c0c0e]">
-                  <span className="text-xs text-zinc-500 uppercase tracking-wider font-mono">{result.language}</span>
+            {/* IDE split: editor + preview */}
+            <div className="grid lg:grid-cols-2 gap-4">
+              {/* Monaco editor */}
+              <div className="bg-card border border-zinc-800 rounded-md overflow-hidden flex flex-col h-[560px]">
+                <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800 bg-[#0c0c0e]">
+                  <Code2 className="w-4 h-4 text-signal" />
+                  <span className="text-xs text-zinc-400 uppercase tracking-wider font-mono">{result.language}</span>
                 </div>
-                <pre data-testid="code-output" className="p-5 overflow-auto max-h-[560px] text-sm font-mono text-zinc-300 leading-relaxed">
-                  <code>{result.code}</code>
-                </pre>
-              </TabsContent>
+                <div className="flex-1" data-testid="code-output">
+                  <CodeEditor language={result.language} value={editorCode} onChange={setEditorCode} />
+                </div>
+              </div>
 
-              <TabsContent value="preview" className="m-0">
-                {isHtml ? (
-                  <iframe data-testid="preview-iframe" title="preview" srcDoc={result.code}
-                    sandbox="allow-scripts" className="w-full h-[560px] bg-white" />
-                ) : (
-                  <div className="p-16 text-center text-zinc-500">
-                    <Eye className="w-8 h-8 mx-auto text-zinc-700" />
-                    <p className="mt-4">Live preview is available for HTML/CSS output.</p>
-                    <p className="text-sm mt-1">Copy the {result.framework} code into your project to run it.</p>
-                  </div>
-                )}
-              </TabsContent>
+              {/* Preview / Original / DSL */}
+              <Tabs defaultValue="preview" className="bg-card border border-zinc-800 rounded-md overflow-hidden flex flex-col h-[560px]">
+                <TabsList className="bg-[#0c0c0e] border-b border-zinc-800 rounded-none w-full justify-start h-11 p-0 shrink-0">
+                  <TabsTrigger value="preview" data-testid="tab-preview" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
+                    <Eye className="w-4 h-4 mr-2" /> Preview
+                  </TabsTrigger>
+                  <TabsTrigger value="original" data-testid="tab-original" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
+                    <ImageIcon className="w-4 h-4 mr-2" /> Original
+                  </TabsTrigger>
+                  <TabsTrigger value="dsl" data-testid="tab-dsl" className="rounded-none data-[state=active]:bg-card data-[state=active]:text-white h-11 px-5">
+                    <Braces className="w-4 h-4 mr-2" /> Tree
+                  </TabsTrigger>
+                </TabsList>
 
-              <TabsContent value="original" className="m-0 p-5 bg-[#0c0c0e]">
-                <img src={imagePreview} alt="original design" className="w-full max-h-[560px] object-contain mx-auto" />
-              </TabsContent>
-            </Tabs>
+                <TabsContent value="preview" className="m-0 flex-1 overflow-hidden">
+                  <LivePreview framework={result.framework} code={editorCode} />
+                </TabsContent>
+                <TabsContent value="original" className="m-0 flex-1 overflow-auto p-5 bg-[#0c0c0e]">
+                  <img src={imagePreview} alt="original design" className="w-full object-contain mx-auto" />
+                </TabsContent>
+                <TabsContent value="dsl" className="m-0 flex-1 overflow-auto p-4 bg-[#0c0c0e]">
+                  <pre data-testid="dsl-output" className="text-xs font-mono text-zinc-400 leading-relaxed">
+                    {JSON.stringify(result.dsl, null, 2)}
+                  </pre>
+                </TabsContent>
+              </Tabs>
+            </div>
+
+            {/* Chat refinement dock */}
+            <div className="mt-4 bg-card border border-zinc-800 rounded-md">
+              <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800">
+                <Sparkles className="w-4 h-4 text-signal" />
+                <span className="text-sm font-semibold">Refine with AI</span>
+                <span className="text-xs text-zinc-500">— describe a change in plain English</span>
+              </div>
+
+              {chatMessages.length > 0 && (
+                <div className="max-h-52 overflow-auto p-4 space-y-3" data-testid="chat-messages">
+                  {chatMessages.map((m, i) => (
+                    <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                      <div className={`max-w-[80%] rounded-md px-3 py-2 text-sm ${
+                        m.role === "user" ? "bg-signal text-white" : "bg-[#0c0c0e] border border-zinc-800 text-zinc-300"
+                      }`}>
+                        {m.text}
+                      </div>
+                    </div>
+                  ))}
+                  {refining && (
+                    <div className="flex justify-start">
+                      <div className="bg-[#0c0c0e] border border-zinc-800 rounded-md px-3 py-2 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-signal dot-1" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-signal dot-2" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-signal dot-3" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="p-3 flex gap-2 border-t border-zinc-800">
+                <Input
+                  data-testid="chat-input"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") sendRefine(); }}
+                  disabled={refining}
+                  placeholder='e.g. "Make the primary button a gradient from indigo to purple"'
+                  className="bg-[#0c0c0e] border-zinc-800 focus:border-zinc-500 rounded-sm h-11"
+                />
+                <Button data-testid="chat-send-btn" onClick={sendRefine} disabled={refining || !chatInput.trim()}
+                  className="bg-signal hover:bg-signal-hover text-white rounded-sm h-11 px-5 font-bold shrink-0">
+                  {refining ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                </Button>
+              </div>
+
+              <div className="px-3 pb-3 flex flex-wrap gap-2">
+                {["Convert to a 3-column grid", "Add a dark mode card style", "Make it more spacious"].map((s) => (
+                  <button key={s} data-testid={`chat-suggestion`} onClick={() => setChatInput(s)} disabled={refining}
+                    className="text-xs border border-zinc-800 rounded-full px-3 py-1 text-zinc-400 hover:text-white hover:border-zinc-600 transition-colors">
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>
