@@ -4,10 +4,11 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import LivePreview from "@/components/LivePreview";
+import { copyToClipboard } from "@/lib/clipboard";
 import {
   Trash2, Copy, Check, Download, Code2, Eye, ImageIcon, Plus, Wand2,
 } from "lucide-react";
@@ -46,9 +47,13 @@ export default function Projects() {
   };
 
   const copyCode = async () => {
-    await navigator.clipboard.writeText(active.code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    const ok = await copyToClipboard(active.code);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } else {
+      toast.error("Couldn't copy — select the code and copy manually.");
+    }
   };
 
   const downloadCode = () => {
@@ -123,6 +128,7 @@ export default function Projects() {
           {active && (
             <>
               <DialogHeader>
+                <DialogDescription className="sr-only">Project details: code, live preview and original design.</DialogDescription>
                 <DialogTitle className="font-heading flex items-center justify-between pr-8">
                   <span>{active.name}</span>
                   <div className="flex gap-2">

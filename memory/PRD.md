@@ -40,3 +40,20 @@ Build a homepage, login, signup, dashboard, and all website pages for the upload
 
 ## Next Tasks
 - Gather user feedback on generated-code quality and add per-framework live preview (sandpack) for React/Vue.
+
+## Iteration 2 (2026-06-14) — Playground IDE expansion
+- **DSL pipeline**: vision model → JSON component tree (meta + tree, OCR/styles) → framework code synthesis. DSL stored per project and shown in a "Tree" tab.
+- **AI chat refinement**: `/api/projects/{id}/refine` edits code via natural language using DSL + current code as context; surgical updates.
+- **Version history + undo/redo**: every generation/refine appends a version; `/api/projects/{id}/restore` navigates history.
+- **Monaco editor** (`@monaco-editor/react`) + **Sandpack live preview** (`@codesandbox/sandpack-react`) for React/Vue, iframe for HTML — full IDE-light playground.
+- **Models**: Claude Sonnet 4.6, Gemini 3.1 Pro, GPT-4o all selectable.
+- **Thumbnails**: lean `/api/projects` list (no full image/code); detail fetched lazily.
+- Fixes: safe clipboard copy (no error overlay), dialog a11y description.
+- Tested: backend 23/23 pytest; frontend all critical flows pass.
+
+## Deferred (next round)
+- Google + GitHub OAuth social login.
+- Real Stripe checkout (currently pricing UI placeholder).
+- Persistent light/dark theme toggle.
+- Split server.py into routers (auth/llm/projects); LLM call timeouts; FRONTEND_URL env alignment.
+- "Open project in editor" (re-open saved project directly into the refinement playground).

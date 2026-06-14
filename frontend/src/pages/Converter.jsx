@@ -11,6 +11,8 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import CodeEditor from "@/components/CodeEditor";
 import LivePreview from "@/components/LivePreview";
+import { copyToClipboard } from "@/lib/clipboard";
+import { toast } from "sonner";
 import {
   Upload, Link2, ImageIcon, X, Wand2, ArrowLeft, RotateCcw, Copy, Check,
   Download, AlertCircle, Code2, Eye, Loader2, Undo2, Redo2, Send, Braces, Sparkles,
@@ -150,9 +152,13 @@ export default function Converter() {
   };
 
   const copyCode = async () => {
-    await navigator.clipboard.writeText(editorCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    const ok = await copyToClipboard(editorCode);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } else {
+      toast.error("Couldn't copy — select the code and copy manually.");
+    }
   };
 
   const downloadCode = () => {
