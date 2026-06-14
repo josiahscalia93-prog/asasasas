@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import DashboardLayout from "@/components/DashboardLayout";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -10,13 +10,14 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import LivePreview from "@/components/LivePreview";
 import { copyToClipboard } from "@/lib/clipboard";
 import {
-  Trash2, Copy, Check, Download, Code2, Eye, ImageIcon, Plus, Wand2,
+  Trash2, Copy, Check, Download, Code2, Eye, ImageIcon, Plus, Wand2, Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 
 const EXT = { React: "jsx", "Vue 3": "vue", "Next.js": "jsx", "HTML/CSS": "html" };
 
 export default function Projects() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(null);
@@ -109,10 +110,16 @@ export default function Projects() {
                       <p className="text-sm text-white truncate font-medium">{p.name}</p>
                       <p className="text-xs text-zinc-500 mt-0.5">{p.framework} · {p.styling}</p>
                     </div>
-                    <button data-testid={`delete-${p.id}`} onClick={(e) => remove(p.id, e)}
-                      className="text-zinc-600 hover:text-destructive transition-colors p-1 opacity-0 group-hover:opacity-100">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button data-testid={`edit-${p.id}`} onClick={(e) => { e.stopPropagation(); navigate(`/convert?project=${p.id}`); }}
+                        title="Open in editor" className="text-zinc-500 hover:text-signal transition-colors p-1">
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button data-testid={`delete-${p.id}`} onClick={(e) => remove(p.id, e)}
+                        title="Delete" className="text-zinc-600 hover:text-destructive transition-colors p-1">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                   <p className="text-xs text-zinc-600 mt-2">{new Date(p.created_at).toLocaleDateString()}</p>
                 </div>
@@ -132,6 +139,10 @@ export default function Projects() {
                 <DialogTitle className="font-heading flex items-center justify-between pr-8">
                   <span>{active.name}</span>
                   <div className="flex gap-2">
+                    <Button data-testid="open-in-editor-btn" onClick={() => navigate(`/convert?project=${active.id}`)} size="sm"
+                      className="bg-signal hover:bg-signal-hover text-white rounded-sm">
+                      <Pencil className="w-4 h-4 mr-2" /> Open in editor
+                    </Button>
                     <Button onClick={copyCode} variant="outline" size="sm"
                       className="border-zinc-700 bg-transparent hover:bg-zinc-900 text-white rounded-sm">
                       {copied ? <Check className="w-4 h-4 text-signal" /> : <Copy className="w-4 h-4" />}

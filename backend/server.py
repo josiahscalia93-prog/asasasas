@@ -19,7 +19,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 from bson import ObjectId
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -391,60 +391,98 @@ async def refine_code(current_code: str, dsl: dict, instruction: str, framework:
 # ---------------------------------------------------------------------------
 # Converter / Projects routes
 # ---------------------------------------------------------------------------
-@api_router.post("/generate")
-async def generate(data: GenerateInput, user: dict = Depends(get_current_user)):
-    raw_b64 = data.image_base64
-    if not raw_b64 and data.image_url:
-        try:
-            raw_b64 = base64.b64encode(fetch_image_bytes(data.image_url)).decode("utf-8")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Could not fetch image URL: {e}")
-    if not raw_b64:
-        raise HTTPException(status_code=400, detail="No image provided")
-
+async def run_generation_job(job_id: str, user_id: str, data: dict):
+    """Background worker: does image fetch/normalize + 2 LLM calls, then stores project."""
     try:
+        raw_b64 = data.get("image_base64")
+        if not raw_b64 and data.get("image_url"):
+            raw_b64 = base64.b64encode(fetch_image_bytes(data["image_url"])).decode("utf-8")
+        if not raw_b64:
+            raise ValueError("No image provided")
+
         clean_b64 = normalize_image(raw_b64)
         thumb_b64 = make_thumbnail(raw_b64)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid or unsupported image: {e}")
 
-    provider, model = MODEL_MAP.get(data.model, MODEL_MAP["Claude Sonnet 4.6"])
+        provider, model = MODEL_MAP.get(data.get("model"), MODEL_MAP["Claude Sonnet 4.6"])
 
-    try:
-        # Step 1: vision -> DSL component tree
         dsl = await analyze_to_dsl(clean_b64, provider, model)
-        # Step 2: DSL + image -> framework code
-        code = await synthesize_code(dsl, data.framework, data.styling,
-                                     data.prompt or "", clean_b64, provider, model)
+        code = await synthesize_code(dsl, data["framework"], data["styling"],
+                                     data.get("prompt") or "", clean_b64, provider, model)
+
+        language = LANG_MAP.get(data["framework"], "jsx")
+        now = datetime.now(timezone.utc).isoformat()
+        project = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "name": data.get("name") or f"Untitled • {data['framework']}",
+            "framework": data["framework"],
+            "styling": data["styling"],
+            "model": data.get("model", "Claude Sonnet 4.6"),
+            "prompt": data.get("prompt") or "",
+            "image_base64": clean_b64,
+            "thumbnail": thumb_b64,
+            "dsl": dsl,
+            "code": code,
+            "language": language,
+            "versions": [{"code": code, "label": "Initial generation", "created_at": now}],
+            "current_index": 0,
+            "created_at": now,
+        }
+        await db.projects.insert_one({**project})
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "done", "project_id": project["id"]}},
+        )
     except Exception as e:
-        logger.exception("Generation failed")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+        logger.exception("Generation job failed")
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "error", "error": str(e)[:500]}},
+        )
 
-    language = LANG_MAP.get(data.framework, "jsx")
-    now = datetime.now(timezone.utc).isoformat()
-    version0 = {"code": code, "label": "Initial generation", "created_at": now}
 
-    project = {
-        "id": str(uuid.uuid4()),
+@api_router.post("/generate")
+async def generate(data: GenerateInput, background_tasks: BackgroundTasks,
+                   user: dict = Depends(get_current_user)):
+    if not data.image_base64 and not data.image_url:
+        raise HTTPException(status_code=400, detail="No image provided")
+
+    job_id = str(uuid.uuid4())
+    await db.jobs.insert_one({
+        "id": job_id,
         "user_id": str(user["_id"]),
-        "name": data.name or f"Untitled • {data.framework}",
+        "status": "processing",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Strip data-url prefix if present (keeps payload clean)
+    img = data.image_base64
+    if img and img.startswith("data:"):
+        img = img.split(",", 1)[-1]
+    background_tasks.add_task(run_generation_job, job_id, str(user["_id"]), {
+        "image_base64": img,
+        "image_url": data.image_url,
         "framework": data.framework,
         "styling": data.styling,
+        "prompt": data.prompt,
+        "name": data.name,
         "model": data.model,
-        "prompt": data.prompt or "",
-        "image_base64": clean_b64,
-        "thumbnail": thumb_b64,
-        "dsl": dsl,
-        "code": code,
-        "language": language,
-        "versions": [version0],
-        "current_index": 0,
-        "created_at": now,
-    }
-    await db.projects.insert_one({**project})
-    project.pop("_id", None)
-    project.pop("image_base64", None)
-    return project
+    })
+    return {"job_id": job_id, "status": "processing"}
+
+
+@api_router.get("/generate/status/{job_id}")
+async def generate_status(job_id: str, user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id, "user_id": str(user["_id"])}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    resp = {"status": job["status"]}
+    if job["status"] == "done":
+        proj = await db.projects.find_one(
+            {"id": job["project_id"]}, {"_id": 0, "image_base64": 0})
+        resp["project"] = proj
+    elif job["status"] == "error":
+        resp["error"] = job.get("error", "Generation failed")
+    return resp
 
 
 @api_router.post("/projects/{project_id}/refine")

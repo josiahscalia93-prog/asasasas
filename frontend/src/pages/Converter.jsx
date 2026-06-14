@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import DashboardLayout from "@/components/DashboardLayout";
 import { api, formatApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -80,8 +81,38 @@ export default function Converter() {
 
   const fileRef = useRef(null);
   const stageTimer = useRef(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => () => clearInterval(stageTimer.current), []);
+
+  // Load a saved project straight into the playground ("Open in editor")
+  useEffect(() => {
+    const pid = searchParams.get("project");
+    if (!pid) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get(`/projects/${pid}`);
+        if (cancelled) return;
+        setResult(data);
+        setEditorCode(data.code);
+        setVersions(data.versions || [{ code: data.code, label: "Initial generation" }]);
+        setCurrentIndex(data.current_index ?? (data.versions ? data.versions.length - 1 : 0));
+        setFramework(data.framework);
+        setStyling(data.styling);
+        setModel(data.model || "Claude Sonnet 4.6");
+        setChatMessages([]);
+        if (data.image_base64) setImagePreview(`data:image/png;base64,${data.image_base64}`);
+        setStep(2);
+      } catch {
+        setError("Could not load that project.");
+      } finally {
+        setSearchParams({}, { replace: true });
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleFile = (file) => {
     if (!file) return;
@@ -122,6 +153,19 @@ export default function Converter() {
     setStep(1);
   };
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const pollJob = async (jobId) => {
+    // Poll up to ~4 minutes; each request is fast so the proxy never times out.
+    for (let i = 0; i < 80; i++) {
+      await sleep(3000);
+      const { data } = await api.get(`/generate/status/${jobId}`);
+      if (data.status === "done") return data.project;
+      if (data.status === "error") throw new Error(data.error || "Generation failed");
+    }
+    throw new Error("Generation timed out. Please try again.");
+  };
+
   const generate = async () => {
     setError("");
     setGenerating(true);
@@ -135,7 +179,8 @@ export default function Converter() {
         name: name || `Untitled • ${framework}`,
         ...(mode === "upload" ? { image_base64: imageB64 } : { image_url: imageUrl.trim() }),
       };
-      const { data } = await api.post("/generate", payload);
+      const { data: job } = await api.post("/generate", payload);
+      const data = await pollJob(job.job_id);
       setResult(data);
       setEditorCode(data.code);
       setVersions(data.versions || [{ code: data.code, label: "Initial generation" }]);
